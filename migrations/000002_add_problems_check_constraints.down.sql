@@ -1,0 +1,1 @@
+ALTER TABLE problems DROP CONSTRAINT IF EXISTS problem_number_check;
