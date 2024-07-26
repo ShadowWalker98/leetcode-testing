@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"net/http"
 	"strconv"
 	"time"
 )
@@ -16,11 +15,11 @@ var DueDateKey = "due date"
 var NumberTimesSolvedKey = "times solved"
 
 type Problem struct {
-	ProblemNumber     int
-	ProblemName       string
-	LastSolvedOn      time.Time
-	DueDate           time.Time
-	NumberTimesSolved int
+	ProblemNumber     int       `json:"problem_number"`
+	ProblemName       string    `json:"problem_name"`
+	LastSolvedOn      time.Time `json:"last_solved_on"`
+	DueDate           time.Time `json:"due_date"`
+	NumberTimesSolved int       `json:"number_of_times_solved"`
 }
 
 func (p Problem) ToString() string {
@@ -77,9 +76,9 @@ func (p ProblemModel) SelectRowWithProblemNumber(problemNumber int) (Problem, bo
 	return problem, true
 }
 
-func (p ProblemModel) UpdateProblem(oldProblem Problem, newProblem Problem) (error, bool) {
-	query := `UPDATE problems SET last_solved_on = $1, due_date = $2, number_times_solved = $3;`
-	args := []interface{}{newProblem.LastSolvedOn, newProblem.DueDate, oldProblem.NumberTimesSolved + 1}
+func (p ProblemModel) UpdateProblem(newProblem Problem) error {
+	query := `UPDATE problems SET last_solved_on = $1, due_date = $2, number_times_solved = $3 WHERE problem_number = $4;`
+	args := []interface{}{newProblem.LastSolvedOn, newProblem.DueDate, newProblem.NumberTimesSolved, newProblem.ProblemNumber}
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
 	defer cancel()
@@ -88,19 +87,21 @@ func (p ProblemModel) UpdateProblem(oldProblem Problem, newProblem Problem) (err
 
 	if err != nil {
 		fmt.Println(err)
-		return errors.New("error while updating row"), false
+		return errors.New("error while updating row")
 	}
 	fmt.Printf("Rows updated: %d\n", rows)
-	return nil, true
+	return nil
 }
 
-func (p ProblemModel) ViewAllProblemsResponseWriter(w http.ResponseWriter) {
+func (p ProblemModel) ViewAllProblemsResponseWriter() []Problem {
 	query := `SELECT * FROM problems`
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*30)
 	defer cancel()
 
 	rows, err := p.DB.QueryContext(ctx, query)
+
+	var problems []Problem
 
 	for rows.Next() {
 		var problem Problem
@@ -113,7 +114,8 @@ func (p ProblemModel) ViewAllProblemsResponseWriter(w http.ResponseWriter) {
 			fmt.Println(err)
 
 		}
-		_, err = fmt.Fprint(w, problem.ToString()+"\n")
+		//_, err = fmt.Fprint(w, problem.ToString()+"\n")
+		problems = append(problems, problem)
 		if err != nil {
 			fmt.Println(err)
 		}
@@ -128,46 +130,71 @@ func (p ProblemModel) ViewAllProblemsResponseWriter(w http.ResponseWriter) {
 	defer func(rows *sql.Rows) {
 		err := rows.Close()
 		if err != nil {
-
+			fmt.Println(err)
 		}
 	}(rows)
+
+	return problems
 }
 
-func (p ProblemModel) ViewAllProblems() {
+func (p ProblemModel) ViewProblemWithNumber(problemNumber int) (Problem, bool) {
+	query := `SELECT * FROM problems WHERE problem_number = $1`
+	args := []interface{}{problemNumber}
 
-	query := `SELECT * FROM problems`
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*30)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
 	defer cancel()
 
-	rows, err := p.DB.QueryContext(ctx, query)
+	var problem Problem
+
+	err := p.DB.QueryRowContext(ctx, query, args...).Scan(
+		&problem.ProblemNumber,
+		&problem.ProblemName,
+		&problem.LastSolvedOn,
+		&problem.DueDate,
+		&problem.NumberTimesSolved)
+
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			fmt.Printf("problem with id %d doesn't exist", problemNumber)
+		}
+		fmt.Println(err)
+		return problem, false
+	}
+
+	return problem, true
+}
+
+func (p ProblemModel) FetchProblemsDueOnOrAfter(date time.Time) []Problem {
+	query := `SELECT * FROM problems WHERE due_date >= $1`
+	args := []interface{}{date}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+	defer cancel()
+
+	rows, err := p.DB.QueryContext(ctx, query, args...)
+
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			fmt.Println("No rows found")
+		}
+	}
+
+	var problemList []Problem
 
 	for rows.Next() {
 		var problem Problem
-		err := rows.Scan(&problem.ProblemNumber,
+
+		rows.Scan(&problem.ProblemNumber,
 			&problem.ProblemName,
 			&problem.LastSolvedOn,
 			&problem.DueDate,
 			&problem.NumberTimesSolved)
-		if err != nil {
-			fmt.Println(err)
 
-		}
-		fmt.Println(problem.ToString())
+		problemList = append(problemList, problem)
 	}
 
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			fmt.Println("No problems solved.")
-		}
-	}
+	return problemList
 
-	defer func(rows *sql.Rows) {
-		err := rows.Close()
-		if err != nil {
-
-		}
-	}(rows)
 }
 
 func (p ProblemModel) DeleteProblem(problemNumber int) bool {
@@ -186,8 +213,9 @@ func (p ProblemModel) DeleteProblem(problemNumber int) bool {
 
 	return true
 }
+
 func ValidateProblemData(v *validator.Validator, problem *Problem) {
 	v.Check(problem.ProblemNumber >= 1, ProblemNumberKey, "problem number must be greater than 0")
-	v.Check(problem.DueDate.After(time.Now()), DueDateKey, "due date must be later than the current time")
+	v.Check(time.Time(problem.DueDate).After(time.Now()), DueDateKey, "due date must be later than the current time")
 	v.Check(problem.NumberTimesSolved >= 0, NumberTimesSolvedKey, "number of times must be >=0")
 }
